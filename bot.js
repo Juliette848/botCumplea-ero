@@ -60,16 +60,31 @@ app.post("/send", async (req, res) => {
     if (!groupName || !message) return res.status(400).json({ error: "faltan datos" });
 
     const chats = await client.getChats();
-    const group = chats.find(c => c.isGroup && c.name === groupName);
-    if (!group) return res.status(404).json({ error: `grupo no encontrado: ${groupName}` });
+    const groups = chats.filter(c => c.isGroup);
+
+    console.log("Total chats:", chats.length);
+    console.log("Total grupos:", groups.length);
+
+    const target = groupName.trim().toLowerCase();
+    const group = groups.find(g => (g.name || "").trim().toLowerCase() === target);
+
+    if (!group) {
+      console.log("Grupo no encontrado. groupName recibido:", groupName);
+      return res.status(404).json({
+        error: `grupo no encontrado: ${groupName}`,
+        gruposDisponibles: groups.map(g => g.name)
+      });
+    }
 
     await group.sendMessage(message);
-    res.json({ ok: true });
+    return res.json({ ok: true, enviadoA: group.name });
+
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "error enviando" });
+    console.error("ERROR /send:", e);
+    return res.status(500).json({ error: "error enviando", detail: String(e?.message || e) });
   }
 });
+
 
 client.initialize();
 app.listen(PORT, () => console.log(`API lista en puerto ${PORT}`));
