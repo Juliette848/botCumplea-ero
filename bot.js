@@ -1,5 +1,5 @@
 const express = require("express");
-const QRCode = require("qrcode"); // ✅ nuevo
+const QRCode = require("qrcode");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const app = express();
@@ -8,23 +8,44 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const BOT_SECRET = process.env.BOT_SECRET || "CAMBIA_ESTO";
 
-let lastQr = null; // ✅ guardamos el QR para mostrarlo como imagen
+let lastQr = null;
+let isReady = false;
 
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: { args: ["--no-sandbox", "--disable-setuid-sandbox"] }
 });
 
+// Espera activa a que WhatsApp esté ready (máx X ms)
+async function waitUntilReady(ms = 10000) {
+  const start = Date.now();
+  while (!isReady && Date.now() - start < ms) {
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return isReady;
+}
+
 client.on("qr", (qr) => {
   lastQr = qr;
+  isReady = false; // si sale QR, no está ready aún
   console.log("📌 QR listo. Ábrelo en: /qr");
 });
 
-client.on("ready", () => console.log("✅ WhatsApp conectado"));
+client.on("ready", () => {
+  isReady = true;
+  console.log("✅ WhatsApp conectado");
+});
 
-app.get("/health", (_, res) => res.json({ ok: true }));
+client.on("disconnected", (reason) => {
+  isReady = false;
+  console.log("⚠️ WhatsApp desconectado:", reason);
+});
 
-// ✅ Nuevo endpoint para ver el QR como imagen
+app.get("/health", (_, res) => {
+  res.json({ ok: true, whatsappReady: isReady });
+});
+
+// QR como imagen
 app.get("/qr", async (_, res) => {
   if (!lastQr) {
     return res
@@ -42,7 +63,7 @@ app.get("/qr", async (_, res) => {
           <div style="text-align:center;font-family:Arial,sans-serif;">
             <h2>Escanea este QR con WhatsApp</h2>
             <p>WhatsApp → Dispositivos vinculados → Vincular dispositivo</p>
-            <img src="${dataUrl}" style="width:320px;height:320px;" />
+            <img src="${dataUrl}" style="width:340px;height:340px;" />
           </div>
         </body>
       </html>
@@ -56,8 +77,18 @@ app.get("/qr", async (_, res) => {
 app.post("/send", async (req, res) => {
   try {
     const { secret, groupName, message } = req.body || {};
+
     if (secret !== BOT_SECRET) return res.status(401).json({ error: "unauthorized" });
     if (!groupName || !message) return res.status(400).json({ error: "faltan datos" });
+
+    // Espera hasta 10s a que WhatsApp esté listo
+    const ok = await waitUntilReady(10000);
+    if (!ok) {
+      return res.status(503).json({
+        error: "whatsapp_no_listo",
+        hint: "WhatsApp aún no está listo. Revisa Logs hasta ver ✅ WhatsApp conectado."
+      });
+    }
 
     const chats = await client.getChats();
     const groups = chats.filter(c => c.isGroup);
@@ -84,7 +115,6 @@ app.post("/send", async (req, res) => {
     return res.status(500).json({ error: "error enviando", detail: String(e?.message || e) });
   }
 });
-
 
 client.initialize();
 app.listen(PORT, () => console.log(`API lista en puerto ${PORT}`));
