@@ -17,7 +17,7 @@ const client = new Client({
 });
 
 // Espera activa a que WhatsApp esté ready (máx X ms)
-async function waitUntilReady(ms = 10000) {
+async function waitUntilReady(ms = 20000) {
   const start = Date.now();
   while (!isReady && Date.now() - start < ms) {
     await new Promise(r => setTimeout(r, 500));
@@ -79,10 +79,16 @@ app.post("/send", async (req, res) => {
     const { secret, groupName, message } = req.body || {};
 
     if (secret !== BOT_SECRET) return res.status(401).json({ error: "unauthorized" });
-    if (!groupName || !message) return res.status(400).json({ error: "faltan datos" });
+    if (!groupName) return res.status(400).json({ error: "faltan datos: groupName" });
 
-    // Espera hasta 10s a que WhatsApp esté listo
-    const ok = await waitUntilReady(10000);
+    // ✅ Si llega mensaje vacío, NO envía nada (solo log)
+    if (!message || !String(message).trim()) {
+      console.log("ℹ️ /send llamado sin mensaje. No se enviará nada.");
+      return res.json({ ok: true, skipped: true, reason: "empty_message" });
+    }
+
+    // Espera a que WhatsApp esté listo
+    const ok = await waitUntilReady(20000);
     if (!ok) {
       return res.status(503).json({
         error: "whatsapp_no_listo",
@@ -90,25 +96,42 @@ app.post("/send", async (req, res) => {
       });
     }
 
+    // Espera extra para que se estabilicen los chats (muy útil en Render)
+    await new Promise(r => setTimeout(r, 2000));
+
     const chats = await client.getChats();
     const groups = chats.filter(c => c.isGroup);
 
     console.log("Total chats:", chats.length);
     console.log("Total grupos:", groups.length);
 
-    const target = groupName.trim().toLowerCase();
-    const group = groups.find(g => (g.name || "").trim().toLowerCase() === target);
+    const target = String(groupName).trim().toLowerCase();
+    const group = groups.find(g => String(g.name || "").trim().toLowerCase() === target);
 
     if (!group) {
-      console.log("Grupo no encontrado. groupName recibido:", groupName);
+      console.log("❌ Grupo no encontrado. groupName recibido:", groupName);
       return res.status(404).json({
         error: `grupo no encontrado: ${groupName}`,
         gruposDisponibles: groups.map(g => g.name)
       });
     }
 
-    await group.sendMessage(message);
-    return res.json({ ok: true, enviadoA: group.name });
+    const chatId = group.id?._serialized;
+    if (!chatId) {
+      console.log("❌ Grupo encontrado pero sin id serializado:", group.name);
+      return res.status(500).json({ error: "grupo_sin_id" });
+    }
+
+    // ✅ Enviar SIN sendSeen para evitar el bug markedUnread
+    try {
+      await client.sendMessage(chatId, message, { sendSeen: false });
+      return res.json({ ok: true, enviadoA: group.name });
+    } catch (err1) {
+      console.error("⚠️ Falló el primer envío. Reintentando en 3s. Error:", err1?.message || err1);
+      await new Promise(r => setTimeout(r, 3000));
+      await client.sendMessage(chatId, message, { sendSeen: false });
+      return res.json({ ok: true, enviadoA: group.name, retried: true });
+    }
 
   } catch (e) {
     console.error("ERROR /send:", e);
